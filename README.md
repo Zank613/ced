@@ -38,6 +38,8 @@ gcc -o ced main.c -lncurses
 - Home/End, PgUp/PgDn: Navigation
 - Mouse: Click to move cursor, wheel scroll.
 
+## See [Contributing](https://github.com/Zank613/ced/blob/master/CONTRIBUTING.md) for contribution.
+
 ## Acknowledgements
 - **[ncurses](https://invisible-island.net/ncurses/)**
 
