@@ -49,7 +49,7 @@ gcc -o ced main.c -lncurses
 - **[ncurses](https://invisible-island.net/ncurses/)**
 
 ## License
-### This project is licensed unde MIT License. Check [LICENSE](https://github.com/Zank613/ced/blob/master/LICENSE) for more.
+### ced is licensed under MIT License. Check [LICENSE](https://github.com/Zank613/ced/blob/master/LICENSE) for more.
 
 ## Notes
 ### Syntax highlighting
