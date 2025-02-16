@@ -27,6 +27,17 @@ gcc -o ced main.c -lncurses
 ./ced
 ```
 
+## Key Bindings
+
+- Ctrl+Q: Quit
+- Ctrl+S: Save
+- Ctrl+O: Open
+- Ctrl+Z: Undo
+- Ctrl+Y: Redo
+- Ctrl+T: Launch a shell (embedded terminal)
+- Home/End, PgUp/PgDn: Navigation
+- Mouse: Click to move cursor, wheel scroll.
+
 ## Acknowledgements
 - **[ncurses](https://invisible-island.net/ncurses/)**
 
