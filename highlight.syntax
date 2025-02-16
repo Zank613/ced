@@ -1,0 +1,27 @@
+SYNTAX ".c" && ".h"
+{
+    /* Fundamental types (C99) */
+    "char", "short", "int", "long", "float", "double", "void", 
+    "_Bool", "_Complex", "_Imaginary", 
+    "signed", "unsigned" 
+    = (255, 0, 0);
+
+    /* Control flow and related */
+    "if", "else", "switch", "case", "default", 
+    "for", "while", "do", 
+    "break", "continue", "return", "goto" 
+    = (0, 255, 0);
+
+    /* Storage-class and qualifiers */
+    "auto", "extern", "static", "register", 
+    "const", "volatile", "restrict", "inline" 
+    = (0, 0, 255);
+
+    /* User-defined types */
+    "struct", "union", "enum", "typedef" 
+    = (255, 255, 0);
+
+    /* Special operator in C99 */
+    "sizeof" 
+    = (255, 0, 255);
+}
