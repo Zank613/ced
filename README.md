@@ -27,6 +27,11 @@ gcc -o ced main.c -lncurses
 ./ced
 ```
 
+## Screenshots
+![ced in action](screenshot_1.png)
+
+**your terminal might look different, I use xcfe4 terminal**
+
 ## Key Bindings
 
 - Ctrl+Q: Quit
