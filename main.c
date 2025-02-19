@@ -1,11 +1,11 @@
 /* ced - A single-file text editor with syntax highlighting using ncurses.
-   - POSIX calls for mkdir/stat
-   - Syntax rules loaded from an external "highlight.syntax" file
-   - Optionally loads settings from "settings.config"
-   - Undo/Redo, mouse support, embedded terminal access (Ctrl+T), etc.
+   Version: v2.5
+   Changes in v2.5:
+     - Added "Goto Line" feature (Ctrl+G)
+     - Display version label in status bar
 
-   Compile:  gcc -o ced_v2 main.c -lncurses
-   Run:      ./ced_v2
+   Compile:  gcc -o ced_v2.5 main.c -lncurses
+   Run:      ./ced_v2.5
 */
 
 #include <ncurses.h>
@@ -16,6 +16,9 @@
 #include <sys/stat.h>   /* for mkdir/stat */
 #include <sys/types.h>  /* for mode_t, etc. */
 #include <errno.h>      /* for errno, strerror */
+
+/* --------------- Version --------------- */
+#define CED_VERSION "v2.5"
 
 /* --------------- Editor Configs and Globals --------------- */
 
@@ -613,83 +616,75 @@ static void draw_text(WINDOW *win)
             mvwprintw(win, row, 0, "%4d |", i + 1);
 
             /* We'll track 'col' on-screen, starting right after the line number. */
-            int col = LINE_NUMBER_WIDTH;
-            char *line = editor.text[i];
-            int len = (int)strlen(line);
-
-            /* 'j' tracks our position in the text buffer. */
-            int j = editor.col_offset;
-
-            /* Render characters until we hit the end of line or run out of screen width. */
-            while (j < len && col < cols)
             {
-                /* Check if we have an identifier (word) */
-                if (isalpha((unsigned char)line[j]) || line[j] == '_')
-                {
-                    int start = j;
-                    /* Advance j until we reach the end of this word (alnum/underscore). */
-                    while (j < len && (isalnum((unsigned char)line[j]) || line[j] == '_'))
-                    {
-                        j++;
-                    }
-                    /* Extract the word */
-                    {
-                        int wlen = j - start;
-                        char word[128];
-                        int highlighted = 0;
-                        if (wlen < 128)
-                        {
-                            strncpy(word, &line[start], wlen);
-                            word[wlen] = '\0';
-                        }
-                        else
-                        {
-                            word[0] = '\0';
-                        }
+                int col = LINE_NUMBER_WIDTH;
+                char *line = editor.text[i];
+                int len = (int)strlen(line);
+                int j = editor.col_offset;
 
-                        /* Look up the token in our binary-searched table. */
+                while (j < len && col < cols)
+                {
+                    /* Check if we have an identifier (word) */
+                    if (isalpha((unsigned char)line[j]) || line[j] == '_')
+                    {
+                        int start = j;
+                        while (j < len && (isalnum((unsigned char)line[j]) || line[j] == '_'))
                         {
-                            TokenMap key;
-                            key.token = word;
+                            j++;
+                        }
+                        {
+                            int wlen = j - start;
+                            char word[128];
+                            int highlighted = 0;
+                            if (wlen < 128)
                             {
-                                TokenMap *found = (TokenMap *)bsearch(
-                                    &key,
-                                    token_lookup,
-                                    token_lookup_count,
-                                    sizeof(TokenMap),
-                                    compare_token_map
-                                );
-                                if (found)
+                                strncpy(word, &line[start], wlen);
+                                word[wlen] = '\0';
+                            }
+                            else
+                            {
+                                word[0] = '\0';
+                            }
+                            {
+                                TokenMap key;
+                                key.token = word;
                                 {
-                                    /* Highlighted word */
-                                    int k;
-                                    wattron(win, COLOR_PAIR(found->color_pair));
-                                    for (k = 0; k < wlen && col < cols; k++, col++)
+                                    TokenMap *found = (TokenMap *)bsearch(
+                                        &key,
+                                        token_lookup,
+                                        token_lookup_count,
+                                        sizeof(TokenMap),
+                                        compare_token_map
+                                    );
+                                    if (found)
                                     {
-                                        mvwaddch(win, row, col, word[k]);
+                                        int k;
+                                        wattron(win, COLOR_PAIR(found->color_pair));
+                                        for (k = 0; k < wlen && col < cols; k++, col++)
+                                        {
+                                            mvwaddch(win, row, col, word[k]);
+                                        }
+                                        wattroff(win, COLOR_PAIR(found->color_pair));
+                                        highlighted = 1;
                                     }
-                                    wattroff(win, COLOR_PAIR(found->color_pair));
-                                    highlighted = 1;
+                                }
+                            }
+                            if (!highlighted)
+                            {
+                                int k;
+                                for (k = 0; k < wlen && col < cols; k++, col++)
+                                {
+                                    mvwaddch(win, row, col, word[k]);
                                 }
                             }
                         }
-                        /* If not highlighted, just print normally */
-                        if (!highlighted)
-                        {
-                            int k;
-                            for (k = 0; k < wlen && col < cols; k++, col++)
-                            {
-                                mvwaddch(win, row, col, word[k]);
-                            }
-                        }
                     }
-                }
-                else
-                {
-                    /* Just a normal char, print it. */
-                    mvwaddch(win, row, col, line[j]);
-                    col++;
-                    j++;
+                    else
+                    {
+                        mvwaddch(win, row, col, line[j]);
+                        col++;
+                        j++;
+                    }
                 }
             }
         }
@@ -704,14 +699,12 @@ static void draw_text(WINDOW *win)
             mvwprintw(win, scr_row, 0, "%4d |", i + 1);
             {
                 int usable = cols - LINE_NUMBER_WIDTH;
-                /* Print from editor.col_offset onward, up to the screen width. */
                 mvwprintw(win, scr_row, LINE_NUMBER_WIDTH, "%.*s",
                           usable, &editor.text[i][editor.col_offset]);
             }
         }
     }
 }
-
 
 void editor_refresh_screen(void)
 {
@@ -720,16 +713,20 @@ void editor_refresh_screen(void)
     getmaxyx(stdscr, rows, cols);
     update_viewport();
     draw_text(stdscr);
+
     {
+        /* Show version, file name, etc. in status line */
         char status[256];
-        const char *fname;
-        fname = (current_file[0] != '\0') ? current_file : "Untitled";
-        snprintf(status, sizeof(status), "File: %s | Ln: %d, Col: %d%s",
+        const char *fname = (current_file[0] != '\0') ? current_file : "Untitled";
+        snprintf(status, sizeof(status),
+                 "[%s] File: %s | Ln: %d, Col: %d%s",
+                 CED_VERSION,
                  fname,
                  editor.cursor_y + 1,
                  editor.cursor_x + 1,
                  (dirty ? " [Modified]" : ""));
-        mvprintw(rows - 1, 0, "%s  (Ctrl+Q: Quit, Ctrl+S: Save, Ctrl+O: Open, Ctrl+Z: Undo, Ctrl+Y: Redo, Ctrl+T: Terminal, Home/End, PgUp/PgDn, Mouse)", status);
+        mvprintw(rows - 1, 0, "%s  (Ctrl+Q: Quit, Ctrl+S: Save, Ctrl+O: Open, Ctrl+Z: Undo, Ctrl+Y: Redo, Ctrl+T: Terminal, Ctrl+G: Goto Line, Home/End, PgUp/PgDn, Mouse)",
+                 status);
     }
     scr_y = editor.cursor_y - editor.row_offset;
     scr_x = editor.cursor_x - editor.col_offset + LINE_NUMBER_WIDTH;
@@ -878,6 +875,31 @@ void editor_prompt(char *prompt, char *buffer, size_t bufsize)
     getnstr(buffer, (int)bufsize - 1);
     noecho();
     curs_set(1);
+}
+
+/* ---------------- Goto Line Feature (Added in v2.5) ---------------- */
+
+void editor_goto_line(void)
+{
+    char line_str[PROMPT_BUFFER_SIZE];
+    int line_num;
+    editor_prompt("Goto line: ", line_str, sizeof(line_str));
+    if (line_str[0] == '\0')
+    {
+        return; /* user cancelled or empty input */
+    }
+    line_num = atoi(line_str);
+    if (line_num < 1)
+    {
+        line_num = 1;
+    }
+    if (line_num > editor.num_lines)
+    {
+        line_num = editor.num_lines;
+    }
+    /* Our internal indexing is zero-based, so subtract 1. */
+    editor.cursor_y = line_num - 1;
+    editor.cursor_x = 0; /* jump to start of that line */
 }
 
 /* --------------- Editor Save File --------------- */
@@ -1070,8 +1092,12 @@ void process_keypress(void)
         }
         return;
     }
+
     switch (ch)
     {
+        case 7: /* Ctrl+G: Goto line */
+            editor_goto_line();
+            break;
         case 17: /* Ctrl+Q */
             endwin();
             exit(0);
@@ -1216,6 +1242,7 @@ int main(void)
 {
     load_config();
     global_syntax_defs = sh_load_syntax_definitions("highlight.syntax");
+
     initscr();
     start_color();
     use_default_colors();
@@ -1225,12 +1252,15 @@ int main(void)
     curs_set(1);
     mousemask(ALL_MOUSE_EVENTS, NULL);
     mouseinterval(0);
+
     init_editor();
+
     while (1)
     {
         editor_refresh_screen();
         process_keypress();
     }
+
     sh_free_syntax_definitions(global_syntax_defs);
     endwin();
     return 0;
