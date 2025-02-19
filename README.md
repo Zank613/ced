@@ -40,6 +40,7 @@ gcc -o ced main.c -lncurses
 - Ctrl+Z: Undo
 - Ctrl+Y: Redo
 - Ctrl+T: Launch a shell (embedded terminal)
+- Ctrl+G: Goto Line
 - Home/End, PgUp/PgDn: Navigation
 - Mouse: Click to move cursor, wheel scroll.
 
