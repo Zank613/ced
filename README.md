@@ -43,6 +43,8 @@ gcc -o ced main.c -lncurses
 - Ctrl+G: Goto Line
 - Ctrl+F: Search
 - Ctrl+R: Replace (prompts the old text and new text, then does a naive replace all in every line)
+- Ctrl+W: Shell panel toggle
+- Ctrl+E: Enter shell command
 - Home/End, PgUp/PgDn: Navigation
 - Mouse: Click to move cursor, wheel scroll.
 

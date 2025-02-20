@@ -1,13 +1,13 @@
 /* ced - A single-file text editor with syntax highlighting using ncurses.
-   Version: v3
-   Changes in v3:
-     1) Incremental / Partial Redraw (only update changed lines)
-     2) Search & Replace:
-        - Ctrl+F: search for a term, highlight occurrences
-        - Ctrl+R: replace all occurrences of one term with another
+   Version: v3.5
+   Changes in v3.5:
+     1) Shell Panel: 
+        - Press Ctrl+W to toggle a shell panel at the bottom.
+        - Press Ctrl+E to enter a shell command, which is executed, 
+          and the output is displayed in that panel.
 
-   Compile:  gcc -o ced_v3 main.c -lncurses
-   Run:      ./ced_v3
+   Compile:  gcc -o ced_v3.5 main.c -lncurses
+   Run:      ./ced_v3.5
 */
 
 #include <ncurses.h>
@@ -20,7 +20,7 @@
 #include <errno.h>      /* for errno, strerror */
 
 /* --------------- Version --------------- */
-#define CED_VERSION "v3"
+#define CED_VERSION "v3.5"
 
 /* --------------- Editor Configs and Globals --------------- */
 
@@ -40,9 +40,6 @@ Config config = { 1, 1 }; /* defaults: both on */
 
 char current_file[PROMPT_BUFFER_SIZE] = {0};
 int dirty = 0; /* if file has unsaved changes */
-
-/* Forward declare editor_prompt() so we can call it anywhere below */
-static void editor_prompt(char *prompt, char *buffer, size_t bufsize);
 
 /* --------------- Syntax Highlighter Data Structures --------------- */
 
@@ -147,10 +144,7 @@ int redo_stack_top = 0;
 
 /* --------------- Partial Redraw Data --------------- */
 
-/* Each index corresponds to a line. If line_dirty[i] == 1, that line needs redrawing. */
 static int line_dirty[MAX_LINES];
-
-/* Mark a single line as dirty */
 void editor_mark_line_dirty(int line)
 {
     if (line >= 0 && line < MAX_LINES)
@@ -158,8 +152,6 @@ void editor_mark_line_dirty(int line)
         line_dirty[line] = 1;
     }
 }
-
-/* Mark all lines as dirty */
 void editor_mark_all_lines_dirty(void)
 {
     int i;
@@ -169,11 +161,20 @@ void editor_mark_all_lines_dirty(void)
     }
 }
 
+/* --------------- Shell Panel Data (v3.5) --------------- */
+
+static int shell_panel_open = 0; /* 1 if the panel is open */
+#define SHELL_PANEL_LINES 256    /* Max lines of shell output */
+static char shell_output[SHELL_PANEL_LINES][MAX_COLS];
+static int shell_output_count = 0;
+
 /* --------------- Search & Replace Data --------------- */
 
-/* We'll store a search term. If it's non-empty, we'll highlight matches. */
 static char g_searchTerm[128] = {0};
 static int g_searchActive = 0;
+
+/* --------------- Forward Declarations --------------- */
+static void editor_prompt(char *prompt, char *buffer, size_t bufsize);
 
 /* --------------- Helper: Trim Whitespace --------------- */
 
@@ -245,7 +246,6 @@ void init_editor(void)
     editor.cursor_y = 0;
     editor.row_offset = 0;
     editor.col_offset = 0;
-
     editor_mark_all_lines_dirty();
 }
 
@@ -329,15 +329,23 @@ void update_viewport(void)
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
 
-    /* vertical scroll */
+    /* If shell panel is open, the text area is smaller. Let's say the shell panel
+       uses the bottom 10 lines. You can tweak this as you like. */
+    int shell_panel_height = 0;
+    if (shell_panel_open)
+    {
+        shell_panel_height = 10; /* or some fraction of rows */
+    }
+
+    /* vertical scroll (account for shell panel at the bottom) */
     if (editor.cursor_y < editor.row_offset)
     {
         editor.row_offset = editor.cursor_y;
         editor_mark_all_lines_dirty();
     }
-    else if (editor.cursor_y >= editor.row_offset + (rows - 1))
+    else if (editor.cursor_y >= editor.row_offset + (rows - 1 - shell_panel_height))
     {
-        editor.row_offset = editor.cursor_y - (rows - 2);
+        editor.row_offset = editor.cursor_y - ((rows - 1 - shell_panel_height) - 1);
         editor_mark_all_lines_dirty();
     }
 
@@ -359,7 +367,6 @@ void update_viewport(void)
 
 /* --------------- Syntax Highlighter Implementation --------------- */
 
-/* Pre-scan for tokens in a rule line. */
 static int sh_count_tokens(const char *line)
 {
     int count = 0;
@@ -380,7 +387,6 @@ static int sh_count_tokens(const char *line)
     return count;
 }
 
-/* Parse one rule line: e.g. "int", "double" = (255,0,0); */
 static int sh_parse_rule_line(char *line, SH_SyntaxRule *rule)
 {
     rule->tokens = NULL;
@@ -512,7 +518,6 @@ static SH_SyntaxDefinitions sh_load_syntax_definitions(const char *filename)
                         }
                     }
 
-                    /* read rules until we hit '}' */
                     while (1)
                     {
                         char rulebuf[4 * SH_MAX_LINE_LENGTH];
@@ -642,29 +647,104 @@ void sh_init_syntax_colors(SH_SyntaxDefinition *def)
     }
 }
 
-/* --------------- Search & Replace Implementation --------------- */
+/* --------------- Shell Panel Implementation (v3.5) --------------- */
 
-/* We'll define a color pair for highlighting search matches. */
+/* Toggle the shell panel on/off (Ctrl+W) */
+void shell_panel_toggle(void)
+{
+    shell_panel_open = !shell_panel_open;
+    editor_mark_all_lines_dirty(); /* so we redraw properly */
+}
+
+/* Run a command in a shell, capture output in shell_output[] */
+void shell_panel_run_command(void)
+{
+    char cmd[PROMPT_BUFFER_SIZE];
+    FILE *fp;
+    editor_prompt("Shell command: ", cmd, sizeof(cmd));
+    if (cmd[0] == '\0')
+    {
+        return;
+    }
+
+    /* Clear old output. */
+    shell_output_count = 0;
+    memset(shell_output, 0, sizeof(shell_output));
+
+    /* Use popen for capturing command output. */
+    fp = popen(cmd, "r");
+    if (!fp)
+    {
+        snprintf(shell_output[0], MAX_COLS, "Error running command: %s", strerror(errno));
+        shell_output_count = 1;
+        return;
+    }
+
+    while (fgets(shell_output[shell_output_count], MAX_COLS, fp))
+    {
+        size_t ln = strlen(shell_output[shell_output_count]);
+        if (ln > 0 && shell_output[shell_output_count][ln - 1] == '\n')
+        {
+            shell_output[shell_output_count][ln - 1] = '\0';
+        }
+        shell_output_count++;
+        if (shell_output_count >= SHELL_PANEL_LINES)
+        {
+            break;
+        }
+    }
+    pclose(fp);
+}
+
+/* Draw the shell panel at the bottom. We'll reserve 10 lines for it. */
+static void shell_panel_draw(void)
+{
+    int rows, cols;
+    int i;
+    getmaxyx(stdscr, rows, cols);
+
+    /* The shell panel is the last 10 lines. */
+    int panel_height = 10;
+    int start_line = rows - panel_height;
+
+    /* A small heading row. */
+    mvprintw(start_line, 0, "=== Shell Panel (Ctrl+W to close, Ctrl+E to enter command) ===");
+    {
+        int line_in_panel = 1;
+        for (i = 0; i < shell_output_count && line_in_panel < panel_height; i++, line_in_panel++)
+        {
+            move(start_line + line_in_panel, 0);
+            clrtoeol();
+            mvprintw(start_line + line_in_panel, 0, "%s", shell_output[i]);
+        }
+        /* If we have leftover lines, just clear them. */
+        while (line_in_panel < panel_height)
+        {
+            move(start_line + line_in_panel, 0);
+            clrtoeol();
+            line_in_panel++;
+        }
+    }
+}
+
+/* --------------- Search & Replace (v3) --------------- */
+static char search_color_pair_defined = 0;
 #define SEARCH_COLOR_PAIR 200
-static int search_color_pair_defined = 0;
 
 void init_search_color(void)
 {
     if (!search_color_pair_defined)
     {
-        /* Use color #250 (some arbitrary index) for highlight. Adjust as you like. */
         short color_num = 250;
         if (can_change_color())
         {
-            /* Bright yellow highlight. */
-            init_color(color_num, 1000, 1000, 0); /* R=100%, G=100%, B=0% */
+            init_color(color_num, 1000, 1000, 0); /* bright yellow background */
         }
         init_pair(SEARCH_COLOR_PAIR, COLOR_BLACK, color_num);
         search_color_pair_defined = 1;
     }
 }
 
-/* Called when user presses Ctrl+F. */
 void editor_search(void)
 {
     char term[PROMPT_BUFFER_SIZE];
@@ -675,14 +755,12 @@ void editor_search(void)
         g_searchTerm[0] = '\0';
         return;
     }
-    /* Store globally. */
     strncpy(g_searchTerm, term, sizeof(g_searchTerm) - 1);
     g_searchTerm[sizeof(g_searchTerm) - 1] = '\0';
     g_searchActive = 1;
     editor_mark_all_lines_dirty();
 }
 
-/* Naive replace-all in entire file. */
 void editor_replace_all(void)
 {
     char oldstr[PROMPT_BUFFER_SIZE];
@@ -693,17 +771,17 @@ void editor_replace_all(void)
         return;
     }
     editor_prompt("New text: ", newstr, sizeof(newstr));
-    /* For each line, replace all occurrences of oldstr with newstr. */
+
     {
         int i;
+        size_t oldlen = strlen(oldstr);
+        size_t newlen = strlen(newstr);
         for (i = 0; i < editor.num_lines; i++)
         {
             char *line = editor.text[i];
-            char buffer[MAX_COLS * 2]; /* enough for expansions */
+            char buffer[MAX_COLS * 2];
             char *out = buffer;
             char *start = line;
-            size_t oldlen = strlen(oldstr);
-            size_t newlen = strlen(newstr);
             buffer[0] = '\0';
 
             while (1)
@@ -711,21 +789,16 @@ void editor_replace_all(void)
                 char *pos = strstr(start, oldstr);
                 if (!pos)
                 {
-                    /* no more occurrences */
                     strncat(out, start, sizeof(buffer) - strlen(out) - 1);
                     break;
                 }
-                /* copy everything up to pos */
                 {
                     size_t segment_len = (size_t)(pos - start);
                     strncat(out, start, segment_len);
                 }
-                /* then the new string */
                 strncat(out, newstr, sizeof(buffer) - strlen(out) - 1);
-                /* move start */
                 start = pos + oldlen;
             }
-            /* copy back to editor line */
             strncpy(line, buffer, MAX_COLS - 1);
             line[MAX_COLS - 1] = '\0';
             editor_mark_line_dirty(i);
@@ -735,8 +808,6 @@ void editor_replace_all(void)
 }
 
 /* --------------- Drawing Single Line --------------- */
-
-/* If search is active, highlight occurrences of g_searchTerm. Otherwise normal. */
 static void draw_line(WINDOW *win, int row, int line_idx, int cols)
 {
     int col = LINE_NUMBER_WIDTH;
@@ -746,14 +817,6 @@ static void draw_line(WINDOW *win, int row, int line_idx, int cols)
 
     mvwprintw(win, row, 0, "%4d |", line_idx + 1);
 
-    if (syntax_enabled && selected_syntax && token_lookup)
-    {
-        /* We'll do a combined approach: highlight tokens + search matches. */
-        /* For simplicity, let's do search highlight first. Then do token approach. */
-        /* (A more advanced approach would unify them, but let's keep it simpler.) */
-    }
-
-    /* If search is active, highlight matches of g_searchTerm. */
     if (g_searchActive && g_searchTerm[0] != '\0')
     {
         init_search_color();
@@ -763,11 +826,9 @@ static void draw_line(WINDOW *win, int row, int line_idx, int cols)
     {
         if (g_searchActive && g_searchTerm[0] != '\0')
         {
-            /* check if line[j..] starts with g_searchTerm */
             size_t term_len = strlen(g_searchTerm);
             if (strncmp(&line[j], g_searchTerm, term_len) == 0)
             {
-                /* highlight this substring */
                 wattron(win, COLOR_PAIR(SEARCH_COLOR_PAIR));
                 {
                     size_t k;
@@ -781,7 +842,6 @@ static void draw_line(WINDOW *win, int row, int line_idx, int cols)
                 continue;
             }
         }
-        /* normal char */
         mvwaddch(win, row, col, line[j]);
         col++;
         j++;
@@ -789,61 +849,85 @@ static void draw_line(WINDOW *win, int row, int line_idx, int cols)
 }
 
 /* --------------- Editor Screen Refresh --------------- */
-
 void editor_refresh_screen(void)
 {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
 
+    /* If shell panel is open, let's say we use 10 lines at the bottom for it. */
+    int shell_panel_height = shell_panel_open ? 10 : 0;
+    int text_area_rows = rows - shell_panel_height - 1; /* 1 line for status */
+
     /* Redraw only dirty lines within visible window. */
     {
         int i;
-        int max_visible = rows - 1; /* last row is status line */
-        for (i = 0; i < max_visible; i++)
+        for (i = 0; i < text_area_rows; i++)
         {
             int line_idx = editor.row_offset + i;
-            if (line_idx >= 0 && line_idx < editor.num_lines && line_dirty[line_idx] == 1)
+            if (line_idx >= 0 && line_idx < editor.num_lines)
             {
-                /* draw this line */
-                move(i, 0);
-                clrtoeol();
-                draw_line(stdscr, i, line_idx, cols);
-                line_dirty[line_idx] = 0; /* done */
+                if (line_dirty[line_idx] == 1)
+                {
+                    move(i, 0);
+                    clrtoeol();
+                    draw_line(stdscr, i, line_idx, cols);
+                    line_dirty[line_idx] = 0;
+                }
             }
-            else if (line_idx >= editor.num_lines)
+            else
             {
-                /* clear any leftover lines from old content */
+                /* Clear leftover line if beyond file */
                 move(i, 0);
                 clrtoeol();
             }
         }
     }
 
-    /* Draw status line at bottom */
+    /* Clear any lines between the end of text_area_rows and the status line if needed. */
     {
-        char status[256];
-        const char *fname = (current_file[0] != '\0') ? current_file : "Untitled";
-        int rows_, cols_;
-        getmaxyx(stdscr, rows_, cols_);
-        move(rows_ - 1, 0);
-        clrtoeol();
-        snprintf(status, sizeof(status),
-                 "[%s] File: %s | Ln: %d, Col: %d%s",
-                 CED_VERSION,
-                 fname,
-                 editor.cursor_y + 1,
-                 editor.cursor_x + 1,
-                 (dirty ? " [Modified]" : ""));
-        mvprintw(rows_ - 1, 0,
-                 "%s  (Ctrl+Q:Quit, Ctrl+S:Save, Ctrl+O:Open, Ctrl+Z:Undo, Ctrl+Y:Redo, Ctrl+T:Terminal, Ctrl+G:Goto, Ctrl+F:Search, Ctrl+R:Replace, Home/End, PgUp/PgDn)",
-                 status);
+        int i;
+        for (i = editor.num_lines - editor.row_offset; i < text_area_rows; i++)
+        {
+            if (i >= 0)
+            {
+                move(i, 0);
+                clrtoeol();
+            }
+        }
     }
 
-    /* Move cursor to correct position */
+    /* Draw status line at row text_area_rows */
+    {
+        int status_row = text_area_rows;
+        move(status_row, 0);
+        clrtoeol();
+        {
+            char status[256];
+            const char *fname = (current_file[0] != '\0') ? current_file : "Untitled";
+            snprintf(status, sizeof(status),
+                     "[%s] File: %s | Ln: %d, Col: %d%s",
+                     CED_VERSION,
+                     fname,
+                     editor.cursor_y + 1,
+                     editor.cursor_x + 1,
+                     (dirty ? " [Modified]" : ""));
+            mvprintw(status_row, 0,
+                     "%s  (Ctrl+Q:Quit, Ctrl+S:Save, Ctrl+O:Open, Ctrl+Z:Undo, Ctrl+Y:Redo, Ctrl+T:Terminal, Ctrl+G:Goto, Ctrl+F:Search, Ctrl+R:Replace, Ctrl+W:ShellPanel, Home/End, PgUp/PgDn)",
+                     status);
+        }
+    }
+
+    /* If shell panel is open, draw it in the bottom portion. */
+    if (shell_panel_open)
+    {
+        shell_panel_draw();
+    }
+
+    /* Move cursor to correct position in the text area. */
     {
         int scr_y = editor.cursor_y - editor.row_offset;
         int scr_x = editor.cursor_x - editor.col_offset + LINE_NUMBER_WIDTH;
-        if (scr_y >= 0 && scr_y < rows - 1)
+        if (scr_y >= 0 && scr_y < text_area_rows)
         {
             move(scr_y, scr_x);
         }
@@ -854,7 +938,6 @@ void editor_refresh_screen(void)
 }
 
 /* --------------- Editor Operations --------------- */
-
 void editor_insert_char(int ch)
 {
     char *line = editor.text[editor.cursor_y];
@@ -994,8 +1077,7 @@ void editor_insert_newline(void)
 }
 
 /* --------------- Editor Prompt --------------- */
-
-void editor_prompt(char *prompt, char *buffer, size_t bufsize)
+static void editor_prompt(char *prompt, char *buffer, size_t bufsize)
 {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
@@ -1009,8 +1091,7 @@ void editor_prompt(char *prompt, char *buffer, size_t bufsize)
     curs_set(1);
 }
 
-/* ---------------- Goto Line Feature ---------------- */
-
+/* --------------- Goto Line --------------- */
 void editor_goto_line(void)
 {
     char line_str[PROMPT_BUFFER_SIZE];
@@ -1018,7 +1099,7 @@ void editor_goto_line(void)
     editor_prompt("Goto line: ", line_str, sizeof(line_str));
     if (line_str[0] == '\0')
     {
-        return; /* user cancelled or empty input */
+        return;
     }
     line_num = atoi(line_str);
     if (line_num < 1)
@@ -1029,13 +1110,12 @@ void editor_goto_line(void)
     {
         line_num = editor.num_lines;
     }
-    editor.cursor_y = line_num - 1; /* zero-based */
+    editor.cursor_y = line_num - 1;
     editor.cursor_x = 0;
     editor_mark_all_lines_dirty();
 }
 
 /* --------------- Editor Save File --------------- */
-
 void editor_save_file(void)
 {
     char filename[PROMPT_BUFFER_SIZE];
@@ -1097,7 +1177,6 @@ void editor_save_file(void)
 }
 
 /* --------------- Editor Load File --------------- */
-
 void editor_load_file(void)
 {
     char filename[PROMPT_BUFFER_SIZE];
@@ -1179,7 +1258,6 @@ void launch_terminal(void)
 }
 
 /* --------------- Process Key & Mouse --------------- */
-
 void process_keypress(void)
 {
     int ch = getch();
@@ -1192,8 +1270,8 @@ void process_keypress(void)
             {
                 int new_y = event.y + editor.row_offset;
                 int new_x = (event.x < LINE_NUMBER_WIDTH)
-                                ? 0
-                                : (event.x - LINE_NUMBER_WIDTH + editor.col_offset);
+                            ? 0
+                            : (event.x - LINE_NUMBER_WIDTH + editor.col_offset);
                 if (new_y >= editor.num_lines)
                 {
                     new_y = editor.num_lines - 1;
@@ -1233,6 +1311,12 @@ void process_keypress(void)
 
     switch (ch)
     {
+        case 23: /* Ctrl+W: Toggle shell panel */
+            shell_panel_toggle();
+            break;
+        case 5: /* Ctrl+E: Enter shell command */
+            shell_panel_run_command();
+            break;
         case 6: /* Ctrl+F: Search */
             editor_search();
             break;
@@ -1388,7 +1472,6 @@ void process_keypress(void)
 }
 
 /* --------------- Main --------------- */
-
 int main(void)
 {
     load_config();
