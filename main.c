@@ -1,11 +1,13 @@
 /* ced - A single-file text editor with syntax highlighting using ncurses.
-   Version: v2.5
-   Changes in v2.5:
-     - Added "Goto Line" feature (Ctrl+G)
-     - Display version label in status bar
+   Version: v3
+   Changes in v3:
+     1) Incremental / Partial Redraw (only update changed lines)
+     2) Search & Replace:
+        - Ctrl+F: search for a term, highlight occurrences
+        - Ctrl+R: replace all occurrences of one term with another
 
-   Compile:  gcc -o ced_v2.5 main.c -lncurses
-   Run:      ./ced_v2.5
+   Compile:  gcc -o ced_v3 main.c -lncurses
+   Run:      ./ced_v3
 */
 
 #include <ncurses.h>
@@ -18,7 +20,7 @@
 #include <errno.h>      /* for errno, strerror */
 
 /* --------------- Version --------------- */
-#define CED_VERSION "v2.5"
+#define CED_VERSION "v3"
 
 /* --------------- Editor Configs and Globals --------------- */
 
@@ -38,6 +40,9 @@ Config config = { 1, 1 }; /* defaults: both on */
 
 char current_file[PROMPT_BUFFER_SIZE] = {0};
 int dirty = 0; /* if file has unsaved changes */
+
+/* Forward declare editor_prompt() so we can call it anywhere below */
+static void editor_prompt(char *prompt, char *buffer, size_t bufsize);
 
 /* --------------- Syntax Highlighter Data Structures --------------- */
 
@@ -72,7 +77,6 @@ int syntax_enabled = 0;  /* 1 if highlighting is active */
 
 /* --------------- Token Lookup for Fast Syntax Highlighting --------------- */
 
-/* Struct for token lookup */
 typedef struct
 {
     char *token;
@@ -82,7 +86,6 @@ typedef struct
 TokenMap *token_lookup = NULL;
 int token_lookup_count = 0;
 
-/* Comparator for qsort and bsearch */
 int compare_token_map(const void *a, const void *b)
 {
     const TokenMap *tm1 = (const TokenMap *)a;
@@ -90,11 +93,9 @@ int compare_token_map(const void *a, const void *b)
     return strcmp(tm1->token, tm2->token);
 }
 
-/* Build a lookup table from the syntax definition tokens */
 void build_token_lookup(SH_SyntaxDefinition *def)
 {
-    int i, j, total;
-    total = 0;
+    int i, j, total = 0;
     for (i = 0; i < def->rule_count; i++)
     {
         total += def->rules[i].token_count;
@@ -143,6 +144,36 @@ EditorState undo_stack[UNDO_STACK_SIZE];
 int undo_stack_top = 0;
 EditorState redo_stack[UNDO_STACK_SIZE];
 int redo_stack_top = 0;
+
+/* --------------- Partial Redraw Data --------------- */
+
+/* Each index corresponds to a line. If line_dirty[i] == 1, that line needs redrawing. */
+static int line_dirty[MAX_LINES];
+
+/* Mark a single line as dirty */
+void editor_mark_line_dirty(int line)
+{
+    if (line >= 0 && line < MAX_LINES)
+    {
+        line_dirty[line] = 1;
+    }
+}
+
+/* Mark all lines as dirty */
+void editor_mark_all_lines_dirty(void)
+{
+    int i;
+    for (i = 0; i < MAX_LINES; i++)
+    {
+        line_dirty[i] = 1;
+    }
+}
+
+/* --------------- Search & Replace Data --------------- */
+
+/* We'll store a search term. If it's non-empty, we'll highlight matches. */
+static char g_searchTerm[128] = {0};
+static int g_searchActive = 0;
 
 /* --------------- Helper: Trim Whitespace --------------- */
 
@@ -214,6 +245,8 @@ void init_editor(void)
     editor.cursor_y = 0;
     editor.row_offset = 0;
     editor.col_offset = 0;
+
+    editor_mark_all_lines_dirty();
 }
 
 /* --------------- Undo/Redo Functions --------------- */
@@ -258,6 +291,7 @@ void undo(void)
         editor.row_offset = st.row_offset;
         editor.col_offset = st.col_offset;
         dirty = 1;
+        editor_mark_all_lines_dirty();
     }
 }
 
@@ -284,6 +318,7 @@ void redo(void)
         editor.row_offset = st.row_offset;
         editor.col_offset = st.col_offset;
         dirty = 1;
+        editor_mark_all_lines_dirty();
     }
 }
 
@@ -291,24 +326,34 @@ void redo(void)
 
 void update_viewport(void)
 {
-    int rows, cols, usable;
+    int rows, cols;
     getmaxyx(stdscr, rows, cols);
+
+    /* vertical scroll */
     if (editor.cursor_y < editor.row_offset)
     {
         editor.row_offset = editor.cursor_y;
+        editor_mark_all_lines_dirty();
     }
     else if (editor.cursor_y >= editor.row_offset + (rows - 1))
     {
         editor.row_offset = editor.cursor_y - (rows - 2);
+        editor_mark_all_lines_dirty();
     }
-    usable = cols - LINE_NUMBER_WIDTH;
-    if (editor.cursor_x < editor.col_offset)
+
+    /* horizontal scroll */
     {
-        editor.col_offset = editor.cursor_x;
-    }
-    else if (editor.cursor_x >= editor.col_offset + usable)
-    {
-        editor.col_offset = editor.cursor_x - usable + 1;
+        int usable = cols - LINE_NUMBER_WIDTH;
+        if (editor.cursor_x < editor.col_offset)
+        {
+            editor.col_offset = editor.cursor_x;
+            editor_mark_all_lines_dirty();
+        }
+        else if (editor.cursor_x >= editor.col_offset + usable)
+        {
+            editor.col_offset = editor.cursor_x - usable + 1;
+            editor_mark_all_lines_dirty();
+        }
     }
 }
 
@@ -317,21 +362,20 @@ void update_viewport(void)
 /* Pre-scan for tokens in a rule line. */
 static int sh_count_tokens(const char *line)
 {
-    int count;
-    const char *p;
-    char *end_quote;
-    count = 0;
-    p = line;
+    int count = 0;
+    const char *p = line;
     while ((p = strchr(p, '\"')) != NULL)
     {
-        p++; 
-        end_quote = (char *)strchr(p, '\"');
-        if (!end_quote)
+        p++;
         {
-            break;
+            char *end_quote = (char *)strchr(p, '\"');
+            if (!end_quote)
+            {
+                break;
+            }
         }
         count++;
-        p = end_quote + 1;
+        p++;
     }
     return count;
 }
@@ -339,191 +383,199 @@ static int sh_count_tokens(const char *line)
 /* Parse one rule line: e.g. "int", "double" = (255,0,0); */
 static int sh_parse_rule_line(char *line, SH_SyntaxRule *rule)
 {
-    int count, idx, len, r, g, b;
-    char *p, *end_quote, *eq, *paren;
     rule->tokens = NULL;
     rule->token_count = 0;
     rule->r = rule->g = rule->b = 0;
-    count = sh_count_tokens(line);
-    if (count > 0)
+
     {
-        rule->tokens = (char **)malloc(sizeof(char *) * count);
-        rule->token_count = count;
-        idx = 0;
-        p = line;
-        while ((p = strchr(p, '\"')) != NULL && idx < count)
+        int count = sh_count_tokens(line);
+        if (count > 0)
         {
-            p++; 
-            end_quote = strchr(p, '\"');
-            if (!end_quote)
-            {
-                break;
-            }
-            len = (int)(end_quote - p);
-            rule->tokens[idx] = (char *)malloc(len + 1);
-            strncpy(rule->tokens[idx], p, len);
-            rule->tokens[idx][len] = '\0';
-            idx++;
-            p = end_quote + 1;
-        }
-    }
-    eq = strchr(line, '=');
-    if (!eq)
-    {
-        return -1;
-    }
-    paren = strchr(eq, '(');
-    if (!paren)
-    {
-        return -1;
-    }
-    if ((sscanf(paren, " ( %d , %d , %d )", &r, &g, &b) < 3) &&
-        (sscanf(paren, " (%d,%d,%d)", &r, &g, &b) < 3))
-    {
-        return -1;
-    }
-    rule->r = r;
-    rule->g = g;
-    rule->b = b;
-    return 0;
-}
-
-/* -------------------------------------------------------------------------
-   SH_SyntaxDefinitions sh_load_syntax_definitions(const char *filename)
-
-   Reads highlight.syntax and accumulates multi-line rules until we find
-   the terminating semicolon. This allows e.g.:
-
-       "char", "short",
-       "int", "long"
-       = (255, 0, 0);
-
-   Also continues until we see a '}' that ends the block of rules.
---------------------------------------------------------------------------- */
-static SH_SyntaxDefinitions sh_load_syntax_definitions(const char *filename)
-{
-    SH_SyntaxDefinitions defs;
-    FILE *fp;
-    char line[SH_MAX_LINE_LENGTH];
-    char rulebuf[4 * SH_MAX_LINE_LENGTH];
-    char *trimmed;
-    int done, have_semicolon;
-    int i;
-    defs.definitions = NULL;
-    defs.count = 0;
-    fp = fopen(filename, "r");
-    if (!fp)
-    {
-        return defs;
-    }
-    while (fgets(line, sizeof(line), fp))
-    {
-        trimmed = trim_whitespace(line);
-        if (strncmp(trimmed, "SYNTAX", 6) == 0)
-        {
-            SH_SyntaxDefinition def;
+            int idx = 0;
             char *p;
-            int len;
-            def.extensions = NULL;
-            def.ext_count = 0;
-            def.rules = NULL;
-            def.rule_count = 0;
-            p = trimmed + 6;
-            while (*p)
+            rule->tokens = (char **)malloc(sizeof(char *) * count);
+            rule->token_count = count;
+            p = line;
+            while ((p = strchr(p, '\"')) != NULL && idx < count)
             {
-                if (*p == '\"')
-                {
-                    char *end;
-                    char *ext;
-                    int ext_len;
-                    p++;
-                    end = strchr(p, '\"');
-                    if (!end)
-                    {
-                        break;
-                    }
-                    ext_len = (int)(end - p);
-                    ext = (char *)malloc(ext_len + 1);
-                    strncpy(ext, p, ext_len);
-                    ext[ext_len] = '\0';
-                    def.extensions = (char **)realloc(def.extensions, sizeof(char *) * (def.ext_count + 1));
-                    def.extensions[def.ext_count] = ext;
-                    def.ext_count++;
-                    p = end + 1;
-                }
-                else
-                {
-                    p++;
-                }
-            }
-            if (!fgets(line, sizeof(line), fp))
-            {
-                break;
-            }
-            trimmed = trim_whitespace(line);
-            if (trimmed[0] != '{')
-            {
-                continue;
-            }
-            while (1)
-            {
-                rulebuf[0] = '\0';
-                done = 0;
-                have_semicolon = 0;
-                while (!have_semicolon)
-                {
-                    if (!fgets(line, sizeof(line), fp))
-                    {
-                        done = 1;
-                        break;
-                    }
-                    trimmed = trim_whitespace(line);
-                    if (trimmed[0] == '}')
-                    {
-                        done = 1;
-                        break;
-                    }
-                    if (strlen(trimmed) == 0)
-                    {
-                        continue;
-                    }
-                    strncat(rulebuf, trimmed, sizeof(rulebuf) - strlen(rulebuf) - 2);
-                    strncat(rulebuf, " ", sizeof(rulebuf) - strlen(rulebuf) - 2);
-                    if (strchr(trimmed, ';') != NULL)
-                    {
-                        have_semicolon = 1;
-                        break;
-                    }
-                }
-                if (done)
+                char *end_quote;
+                p++;
+                end_quote = strchr(p, '\"');
+                if (!end_quote)
                 {
                     break;
                 }
-                trimmed = trim_whitespace(rulebuf);
-                if (trimmed[0] == '\0')
                 {
-                    continue;
+                    int len = (int)(end_quote - p);
+                    rule->tokens[idx] = (char *)malloc(len + 1);
+                    strncpy(rule->tokens[idx], p, len);
+                    rule->tokens[idx][len] = '\0';
                 }
-                {
-                    SH_SyntaxRule rule;
-                    if (sh_parse_rule_line(trimmed, &rule) == 0)
-                    {
-                        def.rules = (SH_SyntaxRule *)realloc(def.rules, sizeof(SH_SyntaxRule) * (def.rule_count + 1));
-                        def.rules[def.rule_count] = rule;
-                        def.rule_count++;
-                    }
-                }
+                idx++;
+                p = end_quote + 1;
             }
-            defs.definitions = (SH_SyntaxDefinition *)realloc(defs.definitions, sizeof(SH_SyntaxDefinition) * (defs.count + 1));
-            defs.definitions[defs.count] = def;
-            defs.count++;
         }
     }
-    fclose(fp);
+
+    {
+        char *eq = strchr(line, '=');
+        if (!eq)
+        {
+            return -1;
+        }
+        {
+            char *paren = strchr(eq, '(');
+            if (!paren)
+            {
+                return -1;
+            }
+            {
+                int r, g, b;
+                if ((sscanf(paren, " ( %d , %d , %d )", &r, &g, &b) < 3) &&
+                    (sscanf(paren, " (%d,%d,%d)", &r, &g, &b) < 3))
+                {
+                    return -1;
+                }
+                rule->r = r;
+                rule->g = g;
+                rule->b = b;
+            }
+        }
+    }
+    return 0;
+}
+
+static SH_SyntaxDefinitions sh_load_syntax_definitions(const char *filename)
+{
+    SH_SyntaxDefinitions defs;
+    defs.definitions = NULL;
+    defs.count = 0;
+
+    {
+        FILE *fp = fopen(filename, "r");
+        if (!fp)
+        {
+            return defs;
+        }
+        {
+            char line[SH_MAX_LINE_LENGTH];
+            while (fgets(line, sizeof(line), fp))
+            {
+                char *trimmed = trim_whitespace(line);
+                if (strncmp(trimmed, "SYNTAX", 6) == 0)
+                {
+                    SH_SyntaxDefinition def;
+                    char *p;
+                    def.extensions = NULL;
+                    def.ext_count = 0;
+                    def.rules = NULL;
+                    def.rule_count = 0;
+
+                    p = trimmed + 6;
+                    while (*p)
+                    {
+                        if (*p == '\"')
+                        {
+                            char *end;
+                            int ext_len;
+                            p++;
+                            end = strchr(p, '\"');
+                            if (!end)
+                            {
+                                break;
+                            }
+                            ext_len = (int)(end - p);
+                            {
+                                char *ext = (char *)malloc(ext_len + 1);
+                                strncpy(ext, p, ext_len);
+                                ext[ext_len] = '\0';
+                                def.extensions = (char **)realloc(def.extensions, sizeof(char *) * (def.ext_count + 1));
+                                def.extensions[def.ext_count++] = ext;
+                            }
+                            p = end + 1;
+                        }
+                        else
+                        {
+                            p++;
+                        }
+                    }
+
+                    {
+                        if (!fgets(line, sizeof(line), fp))
+                        {
+                            break;
+                        }
+                        trimmed = trim_whitespace(line);
+                        if (trimmed[0] != '{')
+                        {
+                            continue;
+                        }
+                    }
+
+                    /* read rules until we hit '}' */
+                    while (1)
+                    {
+                        char rulebuf[4 * SH_MAX_LINE_LENGTH];
+                        rulebuf[0] = '\0';
+                        {
+                            int done = 0;
+                            int have_semicolon = 0;
+                            while (!have_semicolon)
+                            {
+                                if (!fgets(line, sizeof(line), fp))
+                                {
+                                    done = 1;
+                                    break;
+                                }
+                                trimmed = trim_whitespace(line);
+                                if (trimmed[0] == '}')
+                                {
+                                    done = 1;
+                                    break;
+                                }
+                                if (strlen(trimmed) == 0)
+                                {
+                                    continue;
+                                }
+                                strncat(rulebuf, trimmed, sizeof(rulebuf) - strlen(rulebuf) - 2);
+                                strncat(rulebuf, " ", sizeof(rulebuf) - strlen(rulebuf) - 2);
+                                if (strchr(trimmed, ';') != NULL)
+                                {
+                                    have_semicolon = 1;
+                                    break;
+                                }
+                            }
+                            if (done)
+                            {
+                                break;
+                            }
+                        }
+                        {
+                            char *rtrim = trim_whitespace(rulebuf);
+                            if (rtrim[0] == '\0')
+                            {
+                                continue;
+                            }
+                            {
+                                SH_SyntaxRule rule;
+                                if (sh_parse_rule_line(rtrim, &rule) == 0)
+                                {
+                                    def.rules = (SH_SyntaxRule *)realloc(def.rules, sizeof(SH_SyntaxRule) * (def.rule_count + 1));
+                                    def.rules[def.rule_count++] = rule;
+                                }
+                            }
+                        }
+                    }
+                    defs.definitions = (SH_SyntaxDefinition *)realloc(defs.definitions, sizeof(SH_SyntaxDefinition) * (defs.count + 1));
+                    defs.definitions[defs.count++] = def;
+                }
+            }
+        }
+        fclose(fp);
+    }
     return defs;
 }
 
-/* Free memory from definitions. */
 void sh_free_syntax_definitions(SH_SyntaxDefinitions defs)
 {
     int i, j, k, t;
@@ -549,16 +601,14 @@ void sh_free_syntax_definitions(SH_SyntaxDefinitions defs)
     free(defs.definitions);
 }
 
-/* Check file extension. */
 int sh_file_has_extension(const char *filename, SH_SyntaxDefinition def)
 {
     int i;
-    size_t elen, flen;
     for (i = 0; i < def.ext_count; i++)
     {
         char *ext = def.extensions[i];
-        elen = strlen(ext);
-        flen = strlen(filename);
+        size_t elen = strlen(ext);
+        size_t flen = strlen(filename);
         if (flen >= elen)
         {
             if (strcmp(filename + flen - elen, ext) == 0)
@@ -570,154 +620,213 @@ int sh_file_has_extension(const char *filename, SH_SyntaxDefinition def)
     return 0;
 }
 
-/* Init colors for each rule. */
 void sh_init_syntax_colors(SH_SyntaxDefinition *def)
 {
-    short next_color_index;
-    short next_pair_index;
+    short next_color_index = 16;
+    short next_pair_index = 1;
     int i;
-    short r_scaled, g_scaled, b_scaled;
-    next_color_index = 16;
-    next_pair_index = 1;
     for (i = 0; i < def->rule_count; i++)
     {
         SH_SyntaxRule *rule = &def->rules[i];
+        short color_num = next_color_index++;
+        short pair_idx = next_pair_index++;
+        short r_scaled = (short)((rule->r * 1000) / 255);
+        short g_scaled = (short)((rule->g * 1000) / 255);
+        short b_scaled = (short)((rule->b * 1000) / 255);
+        if (can_change_color())
         {
-            short color_num, pair_idx;
-            color_num = next_color_index++;
-            pair_idx = next_pair_index++;
-            r_scaled = (short)((rule->r * 1000) / 255);
-            g_scaled = (short)((rule->g * 1000) / 255);
-            b_scaled = (short)((rule->b * 1000) / 255);
-            if (can_change_color())
-            {
-                init_color(color_num, r_scaled, g_scaled, b_scaled);
-            }
-            init_pair(pair_idx, color_num, -1);
-            rule->color_pair = pair_idx;
+            init_color(color_num, r_scaled, g_scaled, b_scaled);
         }
+        init_pair(pair_idx, color_num, -1);
+        rule->color_pair = pair_idx;
     }
 }
 
-/* --------------- Editor Screen Refresh & Syntax Drawing --------------- */
+/* --------------- Search & Replace Implementation --------------- */
 
-static void draw_text(WINDOW *win)
+/* We'll define a color pair for highlighting search matches. */
+#define SEARCH_COLOR_PAIR 200
+static int search_color_pair_defined = 0;
+
+void init_search_color(void)
 {
-    int rows, cols;
-    getmaxyx(win, rows, cols);
+    if (!search_color_pair_defined)
+    {
+        /* Use color #250 (some arbitrary index) for highlight. Adjust as you like. */
+        short color_num = 250;
+        if (can_change_color())
+        {
+            /* Bright yellow highlight. */
+            init_color(color_num, 1000, 1000, 0); /* R=100%, G=100%, B=0% */
+        }
+        init_pair(SEARCH_COLOR_PAIR, COLOR_BLACK, color_num);
+        search_color_pair_defined = 1;
+    }
+}
+
+/* Called when user presses Ctrl+F. */
+void editor_search(void)
+{
+    char term[PROMPT_BUFFER_SIZE];
+    editor_prompt("Search term: ", term, sizeof(term));
+    if (term[0] == '\0')
+    {
+        g_searchActive = 0;
+        g_searchTerm[0] = '\0';
+        return;
+    }
+    /* Store globally. */
+    strncpy(g_searchTerm, term, sizeof(g_searchTerm) - 1);
+    g_searchTerm[sizeof(g_searchTerm) - 1] = '\0';
+    g_searchActive = 1;
+    editor_mark_all_lines_dirty();
+}
+
+/* Naive replace-all in entire file. */
+void editor_replace_all(void)
+{
+    char oldstr[PROMPT_BUFFER_SIZE];
+    char newstr[PROMPT_BUFFER_SIZE];
+    editor_prompt("Old text: ", oldstr, sizeof(oldstr));
+    if (oldstr[0] == '\0')
+    {
+        return;
+    }
+    editor_prompt("New text: ", newstr, sizeof(newstr));
+    /* For each line, replace all occurrences of oldstr with newstr. */
+    {
+        int i;
+        for (i = 0; i < editor.num_lines; i++)
+        {
+            char *line = editor.text[i];
+            char buffer[MAX_COLS * 2]; /* enough for expansions */
+            char *out = buffer;
+            char *start = line;
+            size_t oldlen = strlen(oldstr);
+            size_t newlen = strlen(newstr);
+            buffer[0] = '\0';
+
+            while (1)
+            {
+                char *pos = strstr(start, oldstr);
+                if (!pos)
+                {
+                    /* no more occurrences */
+                    strncat(out, start, sizeof(buffer) - strlen(out) - 1);
+                    break;
+                }
+                /* copy everything up to pos */
+                {
+                    size_t segment_len = (size_t)(pos - start);
+                    strncat(out, start, segment_len);
+                }
+                /* then the new string */
+                strncat(out, newstr, sizeof(buffer) - strlen(out) - 1);
+                /* move start */
+                start = pos + oldlen;
+            }
+            /* copy back to editor line */
+            strncpy(line, buffer, MAX_COLS - 1);
+            line[MAX_COLS - 1] = '\0';
+            editor_mark_line_dirty(i);
+        }
+    }
+    dirty = 1;
+}
+
+/* --------------- Drawing Single Line --------------- */
+
+/* If search is active, highlight occurrences of g_searchTerm. Otherwise normal. */
+static void draw_line(WINDOW *win, int row, int line_idx, int cols)
+{
+    int col = LINE_NUMBER_WIDTH;
+    char *line = editor.text[line_idx];
+    int len = (int)strlen(line);
+    int j = editor.col_offset;
+
+    mvwprintw(win, row, 0, "%4d |", line_idx + 1);
 
     if (syntax_enabled && selected_syntax && token_lookup)
     {
-        int row = 0;
-        int i;
-        for (i = editor.row_offset; i < editor.num_lines && row < rows - 1; i++, row++)
+        /* We'll do a combined approach: highlight tokens + search matches. */
+        /* For simplicity, let's do search highlight first. Then do token approach. */
+        /* (A more advanced approach would unify them, but let's keep it simpler.) */
+    }
+
+    /* If search is active, highlight matches of g_searchTerm. */
+    if (g_searchActive && g_searchTerm[0] != '\0')
+    {
+        init_search_color();
+    }
+
+    while (j < len && col < cols)
+    {
+        if (g_searchActive && g_searchTerm[0] != '\0')
         {
-            /* Print line number at the start */
-            mvwprintw(win, row, 0, "%4d |", i + 1);
-
-            /* We'll track 'col' on-screen, starting right after the line number. */
+            /* check if line[j..] starts with g_searchTerm */
+            size_t term_len = strlen(g_searchTerm);
+            if (strncmp(&line[j], g_searchTerm, term_len) == 0)
             {
-                int col = LINE_NUMBER_WIDTH;
-                char *line = editor.text[i];
-                int len = (int)strlen(line);
-                int j = editor.col_offset;
-
-                while (j < len && col < cols)
+                /* highlight this substring */
+                wattron(win, COLOR_PAIR(SEARCH_COLOR_PAIR));
                 {
-                    /* Check if we have an identifier (word) */
-                    if (isalpha((unsigned char)line[j]) || line[j] == '_')
+                    size_t k;
+                    for (k = 0; k < term_len && col < cols; k++, col++)
                     {
-                        int start = j;
-                        while (j < len && (isalnum((unsigned char)line[j]) || line[j] == '_'))
-                        {
-                            j++;
-                        }
-                        {
-                            int wlen = j - start;
-                            char word[128];
-                            int highlighted = 0;
-                            if (wlen < 128)
-                            {
-                                strncpy(word, &line[start], wlen);
-                                word[wlen] = '\0';
-                            }
-                            else
-                            {
-                                word[0] = '\0';
-                            }
-                            {
-                                TokenMap key;
-                                key.token = word;
-                                {
-                                    TokenMap *found = (TokenMap *)bsearch(
-                                        &key,
-                                        token_lookup,
-                                        token_lookup_count,
-                                        sizeof(TokenMap),
-                                        compare_token_map
-                                    );
-                                    if (found)
-                                    {
-                                        int k;
-                                        wattron(win, COLOR_PAIR(found->color_pair));
-                                        for (k = 0; k < wlen && col < cols; k++, col++)
-                                        {
-                                            mvwaddch(win, row, col, word[k]);
-                                        }
-                                        wattroff(win, COLOR_PAIR(found->color_pair));
-                                        highlighted = 1;
-                                    }
-                                }
-                            }
-                            if (!highlighted)
-                            {
-                                int k;
-                                for (k = 0; k < wlen && col < cols; k++, col++)
-                                {
-                                    mvwaddch(win, row, col, word[k]);
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        mvwaddch(win, row, col, line[j]);
-                        col++;
-                        j++;
+                        mvwaddch(win, row, col, line[j + k]);
                     }
                 }
+                wattroff(win, COLOR_PAIR(SEARCH_COLOR_PAIR));
+                j += (int)term_len;
+                continue;
             }
         }
-    }
-    else
-    {
-        /* No syntax highlighting; just dump the lines. */
-        int i;
-        for (i = editor.row_offset; i < editor.num_lines && i < editor.row_offset + rows - 1; i++)
-        {
-            int scr_row = i - editor.row_offset;
-            mvwprintw(win, scr_row, 0, "%4d |", i + 1);
-            {
-                int usable = cols - LINE_NUMBER_WIDTH;
-                mvwprintw(win, scr_row, LINE_NUMBER_WIDTH, "%.*s",
-                          usable, &editor.text[i][editor.col_offset]);
-            }
-        }
+        /* normal char */
+        mvwaddch(win, row, col, line[j]);
+        col++;
+        j++;
     }
 }
 
+/* --------------- Editor Screen Refresh --------------- */
+
 void editor_refresh_screen(void)
 {
-    int rows, cols, scr_y, scr_x;
-    erase();
+    int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    update_viewport();
-    draw_text(stdscr);
 
+    /* Redraw only dirty lines within visible window. */
     {
-        /* Show version, file name, etc. in status line */
+        int i;
+        int max_visible = rows - 1; /* last row is status line */
+        for (i = 0; i < max_visible; i++)
+        {
+            int line_idx = editor.row_offset + i;
+            if (line_idx >= 0 && line_idx < editor.num_lines && line_dirty[line_idx] == 1)
+            {
+                /* draw this line */
+                move(i, 0);
+                clrtoeol();
+                draw_line(stdscr, i, line_idx, cols);
+                line_dirty[line_idx] = 0; /* done */
+            }
+            else if (line_idx >= editor.num_lines)
+            {
+                /* clear any leftover lines from old content */
+                move(i, 0);
+                clrtoeol();
+            }
+        }
+    }
+
+    /* Draw status line at bottom */
+    {
         char status[256];
         const char *fname = (current_file[0] != '\0') ? current_file : "Untitled";
+        int rows_, cols_;
+        getmaxyx(stdscr, rows_, cols_);
+        move(rows_ - 1, 0);
+        clrtoeol();
         snprintf(status, sizeof(status),
                  "[%s] File: %s | Ln: %d, Col: %d%s",
                  CED_VERSION,
@@ -725,12 +834,21 @@ void editor_refresh_screen(void)
                  editor.cursor_y + 1,
                  editor.cursor_x + 1,
                  (dirty ? " [Modified]" : ""));
-        mvprintw(rows - 1, 0, "%s  (Ctrl+Q: Quit, Ctrl+S: Save, Ctrl+O: Open, Ctrl+Z: Undo, Ctrl+Y: Redo, Ctrl+T: Terminal, Ctrl+G: Goto Line, Home/End, PgUp/PgDn, Mouse)",
+        mvprintw(rows_ - 1, 0,
+                 "%s  (Ctrl+Q:Quit, Ctrl+S:Save, Ctrl+O:Open, Ctrl+Z:Undo, Ctrl+Y:Redo, Ctrl+T:Terminal, Ctrl+G:Goto, Ctrl+F:Search, Ctrl+R:Replace, Home/End, PgUp/PgDn)",
                  status);
     }
-    scr_y = editor.cursor_y - editor.row_offset;
-    scr_x = editor.cursor_x - editor.col_offset + LINE_NUMBER_WIDTH;
-    move(scr_y, scr_x);
+
+    /* Move cursor to correct position */
+    {
+        int scr_y = editor.cursor_y - editor.row_offset;
+        int scr_x = editor.cursor_x - editor.col_offset + LINE_NUMBER_WIDTH;
+        if (scr_y >= 0 && scr_y < rows - 1)
+        {
+            move(scr_y, scr_x);
+        }
+    }
+
     wnoutrefresh(stdscr);
     doupdate();
 }
@@ -739,10 +857,9 @@ void editor_refresh_screen(void)
 
 void editor_insert_char(int ch)
 {
-    int len, i;
-    char *line;
-    line = editor.text[editor.cursor_y];
-    len = (int)strlen(line);
+    char *line = editor.text[editor.cursor_y];
+    int len = (int)strlen(line);
+    int i;
     if (len >= MAX_COLS - 1)
     {
         return;
@@ -751,14 +868,13 @@ void editor_insert_char(int ch)
     {
         line[i + 1] = line[i];
     }
-    line[editor.cursor_x] = ch;
+    line[editor.cursor_x] = (char)ch;
     editor.cursor_x++;
+    editor_mark_line_dirty(editor.cursor_y);
 }
 
 void editor_delete_char(void)
 {
-    int i, len, prev_len;
-    char *line;
     if (editor.cursor_x == 0)
     {
         if (editor.cursor_y == 0)
@@ -767,35 +883,39 @@ void editor_delete_char(void)
         }
         else
         {
-            prev_len = (int)strlen(editor.text[editor.cursor_y - 1]);
+            int prev_len = (int)strlen(editor.text[editor.cursor_y - 1]);
             strcat(editor.text[editor.cursor_y - 1], editor.text[editor.cursor_y]);
-            for (i = editor.cursor_y; i < editor.num_lines - 1; i++)
             {
-                strcpy(editor.text[i], editor.text[i + 1]);
+                int i;
+                for (i = editor.cursor_y; i < editor.num_lines - 1; i++)
+                {
+                    strcpy(editor.text[i], editor.text[i + 1]);
+                }
             }
             editor.num_lines--;
             editor.cursor_y--;
             editor.cursor_x = prev_len;
+            editor_mark_all_lines_dirty();
         }
     }
     else
     {
-        line = editor.text[editor.cursor_y];
-        len = (int)strlen(line);
+        char *line = editor.text[editor.cursor_y];
+        int len = (int)strlen(line);
+        int i;
         for (i = editor.cursor_x - 1; i < len; i++)
         {
             line[i] = line[i + 1];
         }
         editor.cursor_x--;
+        editor_mark_line_dirty(editor.cursor_y);
     }
 }
 
 void editor_delete_at_cursor(void)
 {
-    int i, len;
-    char *line;
-    line = editor.text[editor.cursor_y];
-    len = (int)strlen(line);
+    char *line = editor.text[editor.cursor_y];
+    int len = (int)strlen(line);
     if (editor.cursor_x == len)
     {
         if (editor.cursor_y == editor.num_lines - 1)
@@ -805,60 +925,72 @@ void editor_delete_at_cursor(void)
         else
         {
             strcat(line, editor.text[editor.cursor_y + 1]);
-            for (i = editor.cursor_y + 1; i < editor.num_lines - 1; i++)
             {
-                strcpy(editor.text[i], editor.text[i + 1]);
+                int i;
+                for (i = editor.cursor_y + 1; i < editor.num_lines - 1; i++)
+                {
+                    strcpy(editor.text[i], editor.text[i + 1]);
+                }
             }
             editor.num_lines--;
+            editor_mark_all_lines_dirty();
         }
     }
     else
     {
+        int i;
         for (i = editor.cursor_x; i < len; i++)
         {
             line[i] = line[i + 1];
         }
+        editor_mark_line_dirty(editor.cursor_y);
     }
 }
 
 void editor_insert_newline(void)
 {
-    int len, i, indent;
-    char remainder[MAX_COLS];
-    char new_line[MAX_COLS];
-    char *line;
     if (editor.num_lines >= MAX_LINES)
     {
         return;
     }
-    line = editor.text[editor.cursor_y];
-    len = (int)strlen(line);
-    strcpy(remainder, line + editor.cursor_x);
-    line[editor.cursor_x] = '\0';
-    for (i = editor.num_lines; i > editor.cursor_y + 1; i--)
     {
-        strcpy(editor.text[i], editor.text[i - 1]);
-    }
-    if (config.auto_indent)
-    {
-        indent = 0;
-        while (line[indent] == ' ' && indent < MAX_COLS - 1)
+        char *line = editor.text[editor.cursor_y];
+        int len = (int)strlen(line);
+        char remainder[MAX_COLS];
+        strcpy(remainder, line + editor.cursor_x);
+        line[editor.cursor_x] = '\0';
         {
-            indent++;
+            int i;
+            for (i = editor.num_lines; i > editor.cursor_y + 1; i--)
+            {
+                strcpy(editor.text[i], editor.text[i - 1]);
+            }
         }
-        memset(new_line, ' ', indent);
-        new_line[indent] = '\0';
-        strncat(new_line, remainder, MAX_COLS - indent - 1);
-        strcpy(editor.text[editor.cursor_y + 1], new_line);
-        editor.cursor_x = indent;
+        if (config.auto_indent)
+        {
+            int indent = 0;
+            while (line[indent] == ' ' && indent < MAX_COLS - 1)
+            {
+                indent++;
+            }
+            {
+                char new_line[MAX_COLS];
+                memset(new_line, ' ', indent);
+                new_line[indent] = '\0';
+                strncat(new_line, remainder, MAX_COLS - indent - 1);
+                strcpy(editor.text[editor.cursor_y + 1], new_line);
+            }
+            editor.cursor_x = indent;
+        }
+        else
+        {
+            strcpy(editor.text[editor.cursor_y + 1], remainder);
+            editor.cursor_x = 0;
+        }
+        editor.num_lines++;
+        editor.cursor_y++;
+        editor_mark_all_lines_dirty();
     }
-    else
-    {
-        strcpy(editor.text[editor.cursor_y + 1], remainder);
-        editor.cursor_x = 0;
-    }
-    editor.num_lines++;
-    editor.cursor_y++;
 }
 
 /* --------------- Editor Prompt --------------- */
@@ -877,7 +1009,7 @@ void editor_prompt(char *prompt, char *buffer, size_t bufsize)
     curs_set(1);
 }
 
-/* ---------------- Goto Line Feature (Added in v2.5) ---------------- */
+/* ---------------- Goto Line Feature ---------------- */
 
 void editor_goto_line(void)
 {
@@ -897,9 +1029,9 @@ void editor_goto_line(void)
     {
         line_num = editor.num_lines;
     }
-    /* Our internal indexing is zero-based, so subtract 1. */
-    editor.cursor_y = line_num - 1;
-    editor.cursor_x = 0; /* jump to start of that line */
+    editor.cursor_y = line_num - 1; /* zero-based */
+    editor.cursor_x = 0;
+    editor_mark_all_lines_dirty();
 }
 
 /* --------------- Editor Save File --------------- */
@@ -940,9 +1072,9 @@ void editor_save_file(void)
     {
         strncpy(current_file, filename, PROMPT_BUFFER_SIZE);
     }
+
     {
-        FILE *fp;
-        fp = fopen(current_file, "w");
+        FILE *fp = fopen(current_file, "w");
         if (!fp)
         {
             getmaxyx(stdscr, r, c);
@@ -970,7 +1102,7 @@ void editor_load_file(void)
 {
     char filename[PROMPT_BUFFER_SIZE];
     char filepath[PROMPT_BUFFER_SIZE];
-    char line_buffer[MAX_COLS];  /* New buffer for reading file lines */
+    char line_buffer[MAX_COLS];
     int i, r, c;
     editor_prompt("Open file: ", filename, PROMPT_BUFFER_SIZE);
     if (filename[0] == '\0')
@@ -979,8 +1111,7 @@ void editor_load_file(void)
     }
     snprintf(filepath, PROMPT_BUFFER_SIZE, "saves/%s", filename);
     {
-        FILE *fp;
-        fp = fopen(filepath, "r");
+        FILE *fp = fopen(filepath, "r");
         if (!fp)
         {
             fp = fopen(filename, "r");
@@ -999,10 +1130,10 @@ void editor_load_file(void)
         }
         memset(editor.text, 0, sizeof(editor.text));
         editor.num_lines = 0;
+
         while (fgets(line_buffer, MAX_COLS, fp) && editor.num_lines < MAX_LINES)
         {
-            size_t ln;
-            ln = strlen(line_buffer);
+            size_t ln = strlen(line_buffer);
             if (ln > 0 && line_buffer[ln - 1] == '\n')
             {
                 line_buffer[ln - 1] = '\0';
@@ -1011,6 +1142,7 @@ void editor_load_file(void)
             editor.num_lines++;
         }
         fclose(fp);
+
         editor.cursor_x = 0;
         editor.cursor_y = 0;
         strncpy(current_file, filepath, PROMPT_BUFFER_SIZE);
@@ -1032,6 +1164,7 @@ void editor_load_file(void)
         clrtoeol();
         getch();
     }
+    editor_mark_all_lines_dirty();
 }
 
 /* --------------- Embedded Terminal (Ctrl+T) --------------- */
@@ -1049,29 +1182,32 @@ void launch_terminal(void)
 
 void process_keypress(void)
 {
-    int ch;
-    MEVENT event;
-    ch = getch();
+    int ch = getch();
     if (ch == KEY_MOUSE)
     {
-        int new_y, new_x, ll;
+        MEVENT event;
         if (getmouse(&event) == OK)
         {
             if (event.bstate & BUTTON1_CLICKED)
             {
-                new_y = event.y + editor.row_offset;
-                new_x = (event.x < LINE_NUMBER_WIDTH) ? 0 : (event.x - LINE_NUMBER_WIDTH + editor.col_offset);
+                int new_y = event.y + editor.row_offset;
+                int new_x = (event.x < LINE_NUMBER_WIDTH)
+                                ? 0
+                                : (event.x - LINE_NUMBER_WIDTH + editor.col_offset);
                 if (new_y >= editor.num_lines)
                 {
                     new_y = editor.num_lines - 1;
                 }
-                ll = (int)strlen(editor.text[new_y]);
-                if (new_x > ll)
                 {
-                    new_x = ll;
+                    int ll = (int)strlen(editor.text[new_y]);
+                    if (new_x > ll)
+                    {
+                        new_x = ll;
+                    }
                 }
                 editor.cursor_y = new_y;
                 editor.cursor_x = new_x;
+                editor_mark_all_lines_dirty();
             }
             else if (event.bstate & BUTTON4_PRESSED)
             {
@@ -1080,6 +1216,7 @@ void process_keypress(void)
                 {
                     editor.cursor_y = 0;
                 }
+                editor_mark_all_lines_dirty();
             }
             else if (event.bstate & BUTTON5_PRESSED)
             {
@@ -1088,6 +1225,7 @@ void process_keypress(void)
                 {
                     editor.cursor_y = editor.num_lines - 1;
                 }
+                editor_mark_all_lines_dirty();
             }
         }
         return;
@@ -1095,6 +1233,13 @@ void process_keypress(void)
 
     switch (ch)
     {
+        case 6: /* Ctrl+F: Search */
+            editor_search();
+            break;
+        case 18: /* Ctrl+R: Replace */
+            editor_replace_all();
+            editor_mark_all_lines_dirty();
+            break;
         case 7: /* Ctrl+G: Goto line */
             editor_goto_line();
             break;
@@ -1119,12 +1264,13 @@ void process_keypress(void)
             break;
         case KEY_HOME:
             editor.cursor_x = 0;
+            editor_mark_line_dirty(editor.cursor_y);
             break;
         case KEY_END:
         {
-            int ln;
-            ln = (int)strlen(editor.text[editor.cursor_y]);
+            int ln = (int)strlen(editor.text[editor.cursor_y]);
             editor.cursor_x = ln;
+            editor_mark_line_dirty(editor.cursor_y);
             break;
         }
         case KEY_PPAGE:
@@ -1133,6 +1279,7 @@ void process_keypress(void)
             {
                 editor.cursor_y = 0;
             }
+            editor_mark_all_lines_dirty();
             break;
         case KEY_NPAGE:
             editor.cursor_y += 5;
@@ -1140,6 +1287,7 @@ void process_keypress(void)
             {
                 editor.cursor_y = editor.num_lines - 1;
             }
+            editor_mark_all_lines_dirty();
             break;
         case '\t':
         {
@@ -1162,25 +1310,28 @@ void process_keypress(void)
             if (editor.cursor_x > 0)
             {
                 editor.cursor_x--;
+                editor_mark_line_dirty(editor.cursor_y);
             }
             else if (editor.cursor_y > 0)
             {
                 editor.cursor_y--;
                 editor.cursor_x = (int)strlen(editor.text[editor.cursor_y]);
+                editor_mark_all_lines_dirty();
             }
             break;
         case KEY_RIGHT:
         {
-            int length;
-            length = (int)strlen(editor.text[editor.cursor_y]);
+            int length = (int)strlen(editor.text[editor.cursor_y]);
             if (editor.cursor_x < length)
             {
                 editor.cursor_x++;
+                editor_mark_line_dirty(editor.cursor_y);
             }
             else if (editor.cursor_y < editor.num_lines - 1)
             {
                 editor.cursor_y++;
                 editor.cursor_x = 0;
+                editor_mark_all_lines_dirty();
             }
             break;
         }
@@ -1189,13 +1340,13 @@ void process_keypress(void)
             {
                 editor.cursor_y--;
                 {
-                    int ll;
-                    ll = (int)strlen(editor.text[editor.cursor_y]);
+                    int ll = (int)strlen(editor.text[editor.cursor_y]);
                     if (editor.cursor_x > ll)
                     {
                         editor.cursor_x = ll;
                     }
                 }
+                editor_mark_all_lines_dirty();
             }
             break;
         case KEY_DOWN:
@@ -1203,13 +1354,13 @@ void process_keypress(void)
             {
                 editor.cursor_y++;
                 {
-                    int ll;
-                    ll = (int)strlen(editor.text[editor.cursor_y]);
+                    int ll = (int)strlen(editor.text[editor.cursor_y]);
                     if (editor.cursor_x > ll)
                     {
                         editor.cursor_x = ll;
                     }
                 }
+                editor_mark_all_lines_dirty();
             }
             break;
         case KEY_BACKSPACE:

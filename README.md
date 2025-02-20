@@ -41,6 +41,8 @@ gcc -o ced main.c -lncurses
 - Ctrl+Y: Redo
 - Ctrl+T: Launch a shell (embedded terminal)
 - Ctrl+G: Goto Line
+- Ctrl+F: Search
+- Ctrl+R: Replace (prompts the old text and new text, then does a naive replace all in every line)
 - Home/End, PgUp/PgDn: Navigation
 - Mouse: Click to move cursor, wheel scroll.
 
