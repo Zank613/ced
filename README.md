@@ -1,14 +1,14 @@
 # ced 
-**Custom terminal based text editor written in ANSI C, ncurses and UNIX headers.**
+**Custom terminal based text editor written in C89, ncurses and UNIX headers.**
 
 ## Features
 - Syntax highlighting.
 - Undo/Redo.
 - Status bar.
 - Under 40KB (~37KB).
-- Terminal access from the editor.
 - Designed to be compliant with UNIX/POSIX operating systems.
 - Single file.
+- Shell panel.
 
 ## Prerequisites
 - Use UNIX/POSIX based OS. (e.g. Linux)
@@ -34,12 +34,12 @@ gcc -o ced main.c -lncurses
 
 ## Key Bindings
 
+- Ctrl+H: Hide/Show the keybindings.
 - Ctrl+Q: Quit
 - Ctrl+S: Save
 - Ctrl+O: Open
 - Ctrl+Z: Undo
 - Ctrl+Y: Redo
-- Ctrl+T: Launch a shell (embedded terminal)
 - Ctrl+G: Goto Line
 - Ctrl+F: Search
 - Ctrl+R: Replace (prompts the old text and new text, then does a naive replace all in every line)
@@ -58,7 +58,7 @@ gcc -o ced main.c -lncurses
 
 ## Notes
 ### Syntax highlighting
-- Even though this uses the same *highlight.syntax* file from my previous [text editor](https://github.com/Zank613/simple_editor) they use a slightly different parser.
+- Even though this uses a similar *highlight.syntax* file from my previous [text editor](https://github.com/Zank613/simple_editor) they use a slightly different parser and the file itself is altered for better syntax highlighting.
 
 ### [Previous editor](https://github.com/Zank613/simple_editor)
-- This editor is very similar to the previous editor, this just only a true single file and made in ANSI C.
+- This editor is very similar to the previous editor, this just only a true single file and made in C89.
