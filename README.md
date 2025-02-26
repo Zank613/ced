@@ -45,8 +45,13 @@ gcc -o ced main.c -lncurses
 - Ctrl+R: Replace (prompts the old text and new text, then does a naive replace all in every line)
 - Ctrl+W: Shell panel toggle
 - Ctrl+E: Enter shell command
+- Ctrl+D: Duplicate current line
+- Ctrl+K: Kill (delete) current line
+- Ctrl+T: Toggle line numbers on/off
+- Ctrl+U: Jump to top of file
+- Ctrl+L: Jump to bottom of file
 - Home/End, PgUp/PgDn: Navigation
-- Mouse: Click to move cursor, wheel scroll.
+- Mouse: Click to move cursor, wheel scroll
 
 ## See [Contributing](https://github.com/Zank613/ced/blob/master/CONTRIBUTING.md) for contribution.
 

@@ -1,54 +1,54 @@
-SYNTAX ".c" && ".h"
+SYNTAX ".c" & ".h"
 {
     /* Fundamental types (C99) */
-    "char", "short", "int", "long", "float", "double", "void", 
-    "_Bool", "_Complex", "_Imaginary", 
-    "signed", "unsigned" 
+    "char", "short", "int", "long", "float", "double", "void",
+    "_Bool", "_Complex", "_Imaginary",
+    "signed", "unsigned"
     = (255, 0, 0);
 
     /* Control flow and related */
-    "if", "else", "switch", "case", "default", 
-    "for", "while", "do", 
-    "break", "continue", "return", "goto" 
+    "if", "else", "switch", "case", "default",
+    "for", "while", "do",
+    "break", "continue", "return", "goto"
     = (0, 255, 0);
 
     /* Storage-class and qualifiers */
-    "auto", "extern", "static", "register", 
-    "const", "volatile", "restrict", "inline" 
+    "auto", "extern", "static", "register",
+    "const", "volatile", "restrict", "inline"
     = (0, 0, 255);
 
     /* User-defined types */
-    "struct", "union", "enum", "typedef" 
+    "struct", "union", "enum", "typedef"
     = (255, 255, 0);
 
     /* Special operator in C99 */
-    "sizeof" 
+    "sizeof"
     = (255, 0, 255);
 }
 
 SYNTAX ".cpp"
 {
     /* C++ specific keywords */
-    "class", "public", "private", "protected", 
-    "namespace", "using", "template", "typename", 
-    "virtual", "override", "constexpr", "nullptr" 
+    "class", "public", "private", "protected",
+    "namespace", "using", "template", "typename",
+    "virtual", "override", "constexpr", "nullptr"
     = (255, 128, 0);
 
     /* Control flow */
-    "if", "else", "switch", "case", "default", 
-    "for", "while", "do", 
-    "break", "continue", "return", "goto" 
+    "if", "else", "switch", "case", "default",
+    "for", "while", "do",
+    "break", "continue", "return", "goto"
     = (0, 255, 0);
 }
 
 SYNTAX ".asm"
 {
     /* Basic assembly instructions */
-    "mov", "add", "sub", "mul", "div", 
-    "jmp", "cmp", "je", "jne", "call", "ret" 
+    "mov", "add", "sub", "mul", "div",
+    "jmp", "cmp", "je", "jne", "call", "ret"
     = (128, 128, 255);
 
     /* Directives and registers */
-    ".data", ".text", "eax", "ebx", "ecx", "edx" 
+    ".data", ".text", "eax", "ebx", "ecx", "edx"
     = (0, 200, 200);
 }
