@@ -30,7 +30,7 @@ gcc -o ced main.c -lncurses
 ## Screenshots
 ![ced in action](screenshot_1.png)
 
-**your terminal might look different, I use xcfe4 terminal**
+**your terminal might look different, I use xfce4 terminal**
 
 ## Key Bindings
 
